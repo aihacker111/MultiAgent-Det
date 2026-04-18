@@ -3,7 +3,6 @@ system:
   experiment_dir: experiments
   max_iterations: 10
   gpu_memory_gb: 16.0
-
 training:
   model: yolov8n.pt
   data: data.yaml
@@ -36,49 +35,38 @@ training:
   dropout: 0.0
   project: runs/detect
   name: exp
-
 monitor:
   overfitting_patience: 5
   overfitting_threshold: 0.005
   plateau_patience: 8
   plateau_threshold: 0.001
   grad_norm_max: 100.0
-  lr_collapse_threshold: 1.0e-7
-
+  lr_collapse_threshold: 1.0e-07
+  min_epochs_before_check: 10
+  llm_check_interval: 5
 analyzer:
   weak_class_ap_threshold: 0.3
   small_obj_size: 32
   medium_obj_size: 96
   fp_analysis_iou: 0.5
   anchor_assignment_min_ratio: 0.5
-
 planner:
   model: anthropic/claude-sonnet-4-5
   max_tokens: 2048
   temperature: 0.2
   max_suggestions: 3
   confidence_threshold: 0.6
-
 memory:
   max_entries: 500
   similarity_threshold: 0.75
   embedding_dim: 128
   top_k_recall: 5
   store_path: experiments/memory_store.pkl
-
 trainer:
   max_parallel_jobs: 1
   vram_buffer_gb: 2.0
   dedup_check: true
-
-# Shared LLM config used by ALL agents (Monitor, Analyzer, Memory, Trainer, Planner)
 llm:
   model: anthropic/claude-sonnet-4-5
   max_tokens: 1024
   temperature: 0.1
-  # Per-agent overrides (optional):
-  # monitor_max_tokens: 512
-  # analyzer_max_tokens: 1024
-  # memory_max_tokens: 768
-  # trainer_max_tokens: 768
-  # planner_max_tokens: 2048

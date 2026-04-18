@@ -122,13 +122,11 @@ class ExperimentRegistry:
         if status == "completed" and "end_time" not in updates:
             updates["end_time"] = datetime.now().isoformat()
 
-        if updates:
-            set_clause = ", ".join(f"{k} = ?" for k in updates)
-            values = list(updates.values()) + [status, run_id]
-            sql = f"UPDATE experiments SET {set_clause}, status = ? WHERE run_id = ?"
-        else:
-            values = [status, run_id]
-            sql = "UPDATE experiments SET status = ? WHERE run_id = ?"
+        # Always set status; optional columns first. Avoids "SET , status" when updates is empty.
+        set_parts = [f"{k} = ?" for k in updates]
+        set_parts.append("status = ?")
+        sql = f"UPDATE experiments SET {', '.join(set_parts)} WHERE run_id = ?"
+        values = list(updates.values()) + [status, run_id]
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(sql, values)
             conn.commit()

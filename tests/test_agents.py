@@ -194,9 +194,26 @@ class TestMonitorAgent(unittest.TestCase):
     def tearDown(self): self.tmp.cleanup()
 
     def test_fallback_gradient_explosion(self):
-        d = self.agent._fallback_decision(EpochMetrics(epoch=1, grad_norm=999.0))
+        # New logic: requires sustained grad norm in window (3+ epochs)
+        for _ in range(3):
+            self.agent._grad_norm_window.append(999.0)
+        d = self.agent._fallback_decision(EpochMetrics(epoch=10, grad_norm=999.0))
         self.assertEqual(d["assessment"], "gradient_explosion")
         self.assertTrue(d["should_alert"])
+
+    def test_single_epoch_grad_spike_not_alert(self):
+        # Single spike should NOT trigger — prevents false positives at epoch 1
+        self.agent._grad_norm_window.append(999.0)
+        d = self.agent._fallback_decision(EpochMetrics(epoch=5, grad_norm=999.0))
+        self.assertEqual(d["assessment"], "healthy")
+
+    def test_metrics_corruption_detection(self):
+        from agents.monitor_agent import MonitorAgent
+        m = EpochMetrics(epoch=5, map50=0.0)
+        m.train_box_loss = 0.0
+        self.assertTrue(MonitorAgent._metrics_look_corrupted(m))
+        m2 = EpochMetrics(epoch=0)
+        self.assertFalse(MonitorAgent._metrics_look_corrupted(m2))
 
     def test_fallback_lr_collapse(self):
         d = self.agent._fallback_decision(EpochMetrics(epoch=1, lr=1e-10))
