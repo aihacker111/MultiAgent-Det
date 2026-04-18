@@ -329,13 +329,46 @@ class TrainerAgent(BaseAgent):
             for event_name, fn in monitor_agent.get_callbacks().items():
                 model.add_callback(event_name, fn)
 
-        results = model.train(data=training_cfg.get("data", "data.yaml"), **kwargs)
-        rd = getattr(results, "results_dict", {}) or {}
-        return {
-            "map50": float(rd.get("metrics/mAP50(B)", 0.0)),
-            "map50_95": float(rd.get("metrics/mAP50-95(B)", 0.0)),
-            "best_epoch": getattr(results, "epoch", 0),
-        }
+        try:
+            results = model.train(data=training_cfg.get("data", "data.yaml"), **kwargs)
+            rd = getattr(results, "results_dict", {}) or {}
+            final = {
+                "map50": float(rd.get("metrics/mAP50(B)", 0.0)),
+                "map50_95": float(rd.get("metrics/mAP50-95(B)", 0.0)),
+                "best_epoch": getattr(results, "epoch", 0),
+            }
+        finally:
+            # CRITICAL: free GPU memory before next run regardless of success/failure
+            self._free_gpu_memory(model)
+
+        return final
+
+    @staticmethod
+    def _free_gpu_memory(model=None) -> None:
+        """Release GPU memory fully between training runs to avoid OOM on next run."""
+        import gc
+        try:
+            import torch
+            if model is not None:
+                # Move model off GPU
+                try:
+                    if hasattr(model, "model") and model.model is not None:
+                        model.model.cpu()
+                except Exception:
+                    pass
+                del model
+
+            gc.collect()
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                freed = torch.cuda.memory_reserved(0) / 1024**3
+                # Log remaining reserved (should drop significantly)
+        except ImportError:
+            pass
+        except Exception:
+            pass
 
     def _mock_result(self) -> dict:
         import random
@@ -345,14 +378,47 @@ class TrainerAgent(BaseAgent):
         imgsz = training_cfg.get("imgsz", 640)
         batch = training_cfg.get("batch", 16)
         est = self._estimate_vram_gb(imgsz, batch)
-        ok = est <= (self.gpu_memory_gb - self.vram_buffer_gb)
+        available = self._get_available_vram_gb()
+        ok = est <= available
+        self.logger.debug(
+            f"VRAM check: imgsz={imgsz}, batch={batch} | "
+            f"estimated={est:.1f}GB, available={available:.1f}GB → {'OK' if ok else 'FAIL'}"
+        )
         if not ok:
-            self.logger.warning(f"VRAM: ~{est:.1f}GB needed, {self.gpu_memory_gb - self.vram_buffer_gb:.1f}GB available")
+            self.logger.warning(
+                f"VRAM check FAILED: need ~{est:.1f}GB but only {available:.1f}GB available. "
+                f"Proposal imgsz={imgsz} batch={batch} will be rejected."
+            )
         return ok
 
-    @staticmethod
-    def _estimate_vram_gb(imgsz: int, batch: int) -> float:
-        return (imgsz * imgsz * 3 * 4 * batch * 8.0) / (1024 ** 3)
+    def _get_available_vram_gb(self) -> float:
+        """Query actual free GPU VRAM when possible, else use config budget."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                props = torch.cuda.get_device_properties(0)
+                total = props.total_memory / 1024**3
+                reserved = torch.cuda.memory_reserved(0) / 1024**3
+                free = total - reserved - self.vram_buffer_gb
+                return max(free, 0.0)
+        except Exception:
+            pass
+        return self.gpu_memory_gb - self.vram_buffer_gb
+
+    def _estimate_vram_gb(self, imgsz: int, batch: int) -> float:
+        """
+        Realistic VRAM estimate using reference point from config.
+        YOLO memory scales as: ref_gb * (imgsz/ref_imgsz)^2 * (batch/ref_batch)
+        Add 20% overhead for optimizer states, activations, etc.
+        """
+        trainer_cfg = self.config.get("trainer", {})
+        ref_imgsz = trainer_cfg.get("vram_reference_imgsz", 640)
+        ref_batch  = trainer_cfg.get("vram_reference_batch", 16)
+        ref_gb     = trainer_cfg.get("vram_reference_gb", 13.0)
+
+        scale = ((imgsz / ref_imgsz) ** 2) * (batch / ref_batch)
+        estimated = ref_gb * scale * 1.20  # 20% safety overhead
+        return estimated
 
     @staticmethod
     def _generate_run_id(training_cfg: dict) -> str:

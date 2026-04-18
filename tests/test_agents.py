@@ -344,10 +344,43 @@ class TestTrainerAgent(unittest.TestCase):
     def tearDown(self): self.tmp.cleanup()
 
     def test_vram_check_pass(self):
+        # 640/16 = reference → should pass (same as reference minus buffer)
         self.assertTrue(self.agent._vram_check({"imgsz": 320, "batch": 4}))
 
     def test_vram_check_fail(self):
-        self.assertFalse(self.agent._vram_check({"imgsz": 1280, "batch": 256}))
+        # imgsz=1280 batch=16 = 4x reference = 52GB >> 14GB available
+        self.assertFalse(self.agent._vram_check({"imgsz": 1280, "batch": 16}))
+
+    def test_vram_estimate_scales_correctly(self):
+        # 640 batch=16 → ref_gb*1.2 = 13*1.2 = 15.6
+        est_ref = self.agent._estimate_vram_gb(640, 16)
+        self.assertAlmostEqual(est_ref, 13.0 * 1.2, places=1)
+        # 1280 batch=16 → 4x pixels → 15.6*4 = 62.4
+        est_2x = self.agent._estimate_vram_gb(1280, 16)
+        self.assertAlmostEqual(est_2x, 13.0 * 4 * 1.2, places=1)
+
+    def test_json_truncation_recovery(self):
+        from agents.base_agent import BaseAgent
+        import types
+        # Create minimal concrete BaseAgent to test _parse_json
+        class ConcreteAgent(BaseAgent):
+            AGENT_NAME = "TestAgent"
+            def run(self): pass
+        import tempfile, pathlib
+        from core.event_bus import EventBus
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = {"system": {"log_level": "WARNING"}, "llm": {"model": "x", "temperature": 0.1,
+                   "monitor_max_tokens": 512, "analyzer_max_tokens": 3000,
+                   "memory_max_tokens": 1024, "trainer_max_tokens": 1024, "planner_max_tokens": 2048}}
+            agent = ConcreteAgent(cfg, EventBus(), pathlib.Path(tmp))
+        # Complete JSON parses fine
+        result = agent._parse_json('{"assessment": "healthy", "should_alert": false}')
+        self.assertEqual(result["assessment"], "healthy")
+        # Truncated JSON — should recover what it can or return {}
+        truncated = '{"assessment": "healthy", "should_alert": false, "message": "Training is going well so far'
+        result2 = agent._parse_json(truncated)
+        # May fail, but should not raise
+        self.assertIsInstance(result2, dict)
 
     def test_fallback_decision(self):
         proposals = [
