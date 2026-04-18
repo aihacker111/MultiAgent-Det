@@ -83,7 +83,7 @@ trainer:
 # Shared LLM config — per-agent max_tokens overrides are critical
 # Analyzer needs more tokens because it describes many classes in JSON
 llm:
-  model: anthropic/claude-sonnet-4-5
+  model: anthropic/claude-sonnet-4.6
   temperature: 0.1
   # Per-agent token budgets (increase if seeing "Could not parse LLM JSON")
   monitor_max_tokens: 512
