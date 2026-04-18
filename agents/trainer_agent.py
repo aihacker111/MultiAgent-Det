@@ -93,14 +93,9 @@ class TrainerAgent(BaseAgent):
             training_cfg.get("batch", 16),
         )
         available = self._get_available_vram_gb()
-        if est > available:
-            self.logger.warning(
-                f"VRAM check failed — need ~{est:.1f}GB, "
-                f"available={available:.1f}GB "
-                f"(imgsz={training_cfg.get('imgsz')}, batch={training_cfg.get('batch')}) "
-                f"— skipping: {proposal.rationale}"
-            )
-            return None
+        training_cfg = self._fit_batch_to_vram(training_cfg, available)
+        new_config["training"] = training_cfg
+        
 
         self.logger.debug(f"VRAM OK: ~{est:.1f}GB / {available:.1f}GB")
 
@@ -223,6 +218,44 @@ class TrainerAgent(BaseAgent):
         ref_gb     = cfg.get("vram_reference_gb", 13.0)
         scale = ((imgsz / ref_imgsz) ** 2) * (batch / ref_batch)
         return ref_gb * scale * 1.20
+
+    def _fit_batch_to_vram(self, training_cfg: dict, available_gb: float) -> dict:
+        """
+        Auto-reduce batch size until estimated VRAM fits available memory.
+        Minimum batch = 4 (below this YOLO training becomes unstable).
+        Never hard-rejects — always returns a runnable config.
+        """
+        import copy
+        cfg = copy.copy(training_cfg)
+        imgsz = cfg.get("imgsz", 640)
+        batch = cfg.get("batch", 16)
+        min_batch = 4
+
+        est = self._estimate_vram_gb(imgsz, batch)
+        if est <= available_gb:
+            self.logger.debug(f"VRAM OK: ~{est:.1f}GB / {available_gb:.1f}GB (batch={batch})")
+            return cfg
+
+        original_batch = batch
+        while batch > min_batch:
+            batch = max(batch // 2, min_batch)
+            est = self._estimate_vram_gb(imgsz, batch)
+            if est <= available_gb:
+                break
+
+        cfg["batch"] = batch
+        if batch != original_batch:
+            self.logger.warning(
+                f"VRAM auto-adjust: batch {original_batch} → {batch} "
+                f"(need ~{est:.1f}GB, available={available_gb:.1f}GB, imgsz={imgsz})"
+            )
+        else:
+            self.logger.warning(
+                f"VRAM tight even at min batch={min_batch}: "
+                f"need ~{est:.1f}GB, available={available_gb:.1f}GB — "
+                f"proceeding anyway (Ultralytics may use CPU fallback for some ops)"
+            )
+        return cfg
 
     @staticmethod
     def _free_gpu_memory(model=None) -> None:
