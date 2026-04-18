@@ -122,7 +122,7 @@ class ExperimentRegistry:
         if status == "completed" and "end_time" not in updates:
             updates["end_time"] = datetime.now().isoformat()
 
-        # Always include status; when updates is empty, avoid invalid "SET , status = ?"
+        # When updates is empty, old code produced "SET , status = ?" (syntax error).
         set_parts = [f"{k} = ?" for k in updates]
         set_parts.append("status = ?")
         sql = f"UPDATE experiments SET {', '.join(set_parts)} WHERE run_id = ?"

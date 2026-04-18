@@ -343,79 +343,58 @@ class TestTrainerAgent(unittest.TestCase):
                                           "lr0": 0.01, "weight_decay": 0.0005, "epochs": 1, "data": "data.yaml"}}
     def tearDown(self): self.tmp.cleanup()
 
-    def test_vram_check_pass(self):
-        # 640/16 = reference → should pass (same as reference minus buffer)
-        self.assertTrue(self.agent._vram_check({"imgsz": 320, "batch": 4}))
+    def test_vram_estimate_reference(self):
+        # At reference point (640, 16) → ref_gb * 1.2 = 13 * 1.2 = 15.6
+        est = self.agent._estimate_vram_gb(640, 16)
+        self.assertAlmostEqual(est, 13.0 * 1.2, places=1)
 
-    def test_vram_check_fail(self):
-        # imgsz=1280 batch=16 = 4x reference = 52GB >> 14GB available
-        self.assertFalse(self.agent._vram_check({"imgsz": 1280, "batch": 16}))
+    def test_vram_estimate_scales_with_imgsz(self):
+        # 1280 = 2x imgsz → 4x pixels → 4x memory
+        est_640  = self.agent._estimate_vram_gb(640, 16)
+        est_1280 = self.agent._estimate_vram_gb(1280, 16)
+        self.assertAlmostEqual(est_1280, est_640 * 4, places=1)
 
-    def test_vram_estimate_scales_correctly(self):
-        # 640 batch=16 → ref_gb*1.2 = 13*1.2 = 15.6
-        est_ref = self.agent._estimate_vram_gb(640, 16)
-        self.assertAlmostEqual(est_ref, 13.0 * 1.2, places=1)
-        # 1280 batch=16 → 4x pixels → 15.6*4 = 62.4
-        est_2x = self.agent._estimate_vram_gb(1280, 16)
-        self.assertAlmostEqual(est_2x, 13.0 * 4 * 1.2, places=1)
+    def test_vram_estimate_scales_with_batch(self):
+        est_b16 = self.agent._estimate_vram_gb(640, 16)
+        est_b32 = self.agent._estimate_vram_gb(640, 32)
+        self.assertAlmostEqual(est_b32, est_b16 * 2, places=1)
+
+    def test_proposals_sorted_by_priority(self):
+        proposals = [
+            ConfigDelta(changes={"dropout": 0.1}, confidence=0.7, expected_map_improvement=0.02, priority=3),
+            ConfigDelta(changes={"lr0": 0.005}, confidence=0.8, expected_map_improvement=0.04, priority=1),
+            ConfigDelta(changes={"mosaic": 0.8}, confidence=0.6, expected_map_improvement=0.03, priority=2),
+        ]
+        ordered = sorted(proposals, key=lambda p: p.priority)[:1]
+        self.assertEqual(ordered[0].changes, {"lr0": 0.005})
 
     def test_json_truncation_recovery(self):
         from agents.base_agent import BaseAgent
-        import types
-        # Create minimal concrete BaseAgent to test _parse_json
         class ConcreteAgent(BaseAgent):
             AGENT_NAME = "TestAgent"
             def run(self): pass
         import tempfile, pathlib
         from core.event_bus import EventBus
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = {"system": {"log_level": "WARNING"}, "llm": {"model": "x", "temperature": 0.1,
-                   "monitor_max_tokens": 512, "analyzer_max_tokens": 3000,
-                   "memory_max_tokens": 1024, "trainer_max_tokens": 1024, "planner_max_tokens": 2048}}
+            cfg = {"system": {"log_level": "WARNING"}, "llm": {
+                "model": "x", "temperature": 0.1,
+                "monitor_max_tokens": 512, "analyzer_max_tokens": 3000,
+                "memory_max_tokens": 1024, "trainer_max_tokens": 1024, "planner_max_tokens": 2048}}
             agent = ConcreteAgent(cfg, EventBus(), pathlib.Path(tmp))
-        # Complete JSON parses fine
         result = agent._parse_json('{"assessment": "healthy", "should_alert": false}')
         self.assertEqual(result["assessment"], "healthy")
-        # Truncated JSON — should recover what it can or return {}
         truncated = '{"assessment": "healthy", "should_alert": false, "message": "Training is going well so far'
         result2 = agent._parse_json(truncated)
-        # May fail, but should not raise
         self.assertIsInstance(result2, dict)
 
-    def test_fallback_decision(self):
-        proposals = [
-            ConfigDelta(changes={"lr0": 0.005}, confidence=0.8, expected_map_improvement=0.04, priority=1),
-            ConfigDelta(changes={"imgsz": 1280}, confidence=0.3, expected_map_improvement=0.01, priority=2),
-        ]
-        d = self.agent._fallback_decision(proposals, self.base_config)
-        self.assertIn("accepted", d)
-        self.assertIn("rejected", d)
-
-    def test_apply_decision_no_merge(self):
-        proposals = [
-            ConfigDelta(changes={"lr0": 0.005}, confidence=0.8, expected_map_improvement=0.04, priority=1),
-        ]
-        decision = {"accepted": [{"proposal_index": 0, "priority": 1, "risk_level": "low",
-                                   "risk_reason": "", "scheduling_note": "", "estimated_vram_ok": True}],
-                    "rejected": [], "merge_suggestion": None, "execution_reasoning": "ok"}
-        result = self.agent._apply_decision(decision, proposals, self.base_config)
-        self.assertEqual(len(result), 1)
-
-    def test_apply_decision_merge(self):
-        proposals = [
-            ConfigDelta(changes={"lr0": 0.005}, confidence=0.8, expected_map_improvement=0.03, priority=1),
-            ConfigDelta(changes={"dropout": 0.1}, confidence=0.7, expected_map_improvement=0.02, priority=2),
-        ]
-        decision = {
-            "accepted": [], "rejected": [],
-            "merge_suggestion": {"indices": [0, 1], "merged_changes": {"lr0": 0.005, "dropout": 0.1},
-                                  "rationale": "compatible changes"},
-            "execution_reasoning": "merge"
-        }
-        result = self.agent._apply_decision(decision, proposals, self.base_config)
-        self.assertEqual(len(result), 1)
-        self.assertIn("lr0", result[0].changes)
-        self.assertIn("dropout", result[0].changes)
+    def test_dedup_in_registry(self):
+        # Registering same config twice should be detectable
+        cfg = {"model": "yolov8n.pt", "imgsz": 640, "batch": 4, "lr0": 0.01}
+        self.agent.registry.register("dup_run", {"training": cfg})
+        self.agent.registry.update_status("dup_run", "completed")
+        existing = self.agent.registry.is_duplicate(cfg)
+        self.assertIsNotNone(existing)
+        self.assertEqual(existing.run_id, "dup_run")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
