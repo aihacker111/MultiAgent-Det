@@ -122,13 +122,15 @@ class ExperimentRegistry:
         if status == "completed" and "end_time" not in updates:
             updates["end_time"] = datetime.now().isoformat()
 
-        set_clause = ", ".join(f"{k} = ?" for k in updates)
-        values = list(updates.values()) + [status, run_id]
+        if updates:
+            set_clause = ", ".join(f"{k} = ?" for k in updates)
+            values = list(updates.values()) + [status, run_id]
+            sql = f"UPDATE experiments SET {set_clause}, status = ? WHERE run_id = ?"
+        else:
+            values = [status, run_id]
+            sql = "UPDATE experiments SET status = ? WHERE run_id = ?"
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                f"UPDATE experiments SET {set_clause}, status = ? WHERE run_id = ?",
-                values,
-            )
+            conn.execute(sql, values)
             conn.commit()
 
     def get_all(self, status: Optional[str] = None) -> list[ExperimentRecord]:
